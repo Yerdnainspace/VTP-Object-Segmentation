@@ -1,4 +1,5 @@
 import os
+
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("GLOG_minloglevel", "3")
 os.environ.setdefault("ABSL_LOG_LEVEL", "3")
@@ -126,7 +127,9 @@ def _configure_msvc_build_env():
     sdk_root = r"C:\Program Files (x86)\Windows Kits\10"
     sdk_include_root = os.path.join(sdk_root, "Include")
     sdk_lib_root = os.path.join(sdk_root, "Lib")
-    sdk_versions = sorted([name for name in os.listdir(sdk_include_root) if os.path.isdir(os.path.join(sdk_include_root, name))]) if os.path.isdir(sdk_include_root) else []
+    sdk_versions = sorted([name for name in os.listdir(sdk_include_root) if
+                           os.path.isdir(os.path.join(sdk_include_root, name))]) if os.path.isdir(
+        sdk_include_root) else []
     sdk_version = sdk_versions[-1] if sdk_versions else None
 
     env_paths = []
@@ -139,21 +142,7 @@ def _configure_msvc_build_env():
 
 
 def _maybe_compile_torch_model(torch, model, device_label: str):
-    if device_label != "CUDA":
-        return model, None
-    try:
-        if not hasattr(torch, "compile"):
-            return model, "torch.compile nicht verfuegbar."
-        _configure_msvc_build_env()
-        try:
-            import torch._dynamo
-            torch._dynamo.config.suppress_errors = True
-        except Exception:
-            pass
-        compiled = torch.compile(model, mode="max-autotune")
-        return compiled, "torch.compile max-autotune aktiv"
-    except Exception as exc:
-        return model, f"torch.compile deaktiviert: {exc}"
+    return model, "Kompilierung übersprungen (Triton Fix)"
 
 
 def _disable_failed_torch_compile(model):
@@ -269,7 +258,8 @@ def get_windows_camera_names():
         "} | Select-Object -ExpandProperty Name"
     )
     try:
-        result = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True,
+                                timeout=5)
         if result.returncode != 0: return []
         names = []
         seen = set()
@@ -355,13 +345,17 @@ def load_decklink_api():
 
 
 def get_decklink_output_devices():
-    try: return DeckLinkLiveOutput.list_devices()
-    except Exception: return ["Keine DeckLink-Ausgabe gefunden"]
+    try:
+        return DeckLinkLiveOutput.list_devices()
+    except Exception:
+        return ["Keine DeckLink-Ausgabe gefunden"]
 
 
 def get_decklink_input_devices():
-    try: return DeckLinkLiveInput.list_devices()
-    except Exception: return []
+    try:
+        return DeckLinkLiveInput.list_devices()
+    except Exception:
+        return []
 
 
 def get_live_input_sources():
@@ -375,9 +369,13 @@ def get_live_input_sources():
 
 def run_with_timeout(func, fallback, timeout=6.0):
     result = {"value": fallback}
+
     def worker():
-        try: result["value"] = func()
-        except Exception: result["value"] = fallback
+        try:
+            result["value"] = func()
+        except Exception:
+            result["value"] = fallback
+
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
     thread.join(timeout=float(timeout))
@@ -408,15 +406,18 @@ class DeckLinkLiveOutput:
             iterator = CreateObject(decklink_api.CDeckLinkIterator, interface=decklink_api.IDeckLinkIterator)
             devices = []
             while True:
-                try: decklink = iterator.Next()
-                except Exception: break
+                try:
+                    decklink = iterator.Next()
+                except Exception:
+                    break
                 if not decklink: break
                 try:
                     attributes = decklink.QueryInterface(decklink_api.IDeckLinkProfileAttributes)
                     io_support = int(attributes.GetInt(decklink_api.BMDDeckLinkVideoIOSupport))
                     if not (io_support & int(decklink_api.bmdDeviceSupportsPlayback)): continue
                     devices.append(str(decklink.GetDisplayName()))
-                except Exception: continue
+                except Exception:
+                    continue
             return devices if devices else ["Keine DeckLink-Ausgabe gefunden"]
         finally:
             comtypes.CoUninitialize()
@@ -447,15 +448,18 @@ class DeckLinkLiveOutput:
         iterator = CreateObject(decklink_api.CDeckLinkIterator, interface=decklink_api.IDeckLinkIterator)
         first_playback_device = None
         while True:
-            try: decklink = iterator.Next()
-            except Exception: break
+            try:
+                decklink = iterator.Next()
+            except Exception:
+                break
             if not decklink: break
             try:
                 attributes = decklink.QueryInterface(decklink_api.IDeckLinkProfileAttributes)
                 io_support = int(attributes.GetInt(decklink_api.BMDDeckLinkVideoIOSupport))
                 if not (io_support & int(decklink_api.bmdDeviceSupportsPlayback)): continue
                 display_name = str(decklink.GetDisplayName())
-            except Exception: continue
+            except Exception:
+                continue
             if first_playback_device is None: first_playback_device = decklink
             if display_name == self.device_name: return decklink, display_name
         if first_playback_device is not None:
@@ -463,13 +467,10 @@ class DeckLinkLiveOutput:
         raise RuntimeError("Keine DeckLink-Ausgabekarte gefunden.")
 
     def _frame_to_bgra(self, frame):
-        frame = np.asarray(frame)
-        if frame.shape[:2] != (self.height, self.width):
-            frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
-        if frame.ndim != 3 or frame.shape[2] not in (3, 4):
-            raise RuntimeError("DeckLink-Ausgabe erwartet RGB oder RGBA Frames.")
-        if frame.shape[2] == 4: return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGRA)
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGRA)
+        # FIX: Direkte Konvertierung zur CPU- und Datentransfer-Entlastung
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGRA)
+        return frame
 
     def _write_decklink_frame(self, decklink_output, frame):
         bgra = np.ascontiguousarray(self._frame_to_bgra(frame), dtype=np.uint8)
@@ -513,22 +514,28 @@ class DeckLinkLiveOutput:
                 with self._lock:
                     frame = self._latest_rgb_or_rgba
                     self._latest_rgb_or_rgba = None
-                if frame is None: frame = self._last_rgb_or_rgba
-                else: self._last_rgb_or_rgba = frame
+                if frame is None:
+                    frame = self._last_rgb_or_rgba
+                else:
+                    self._last_rgb_or_rgba = frame
 
                 self._write_decklink_frame(decklink_output, frame)
                 next_frame_time += period
                 sleep_time = next_frame_time - time.perf_counter()
-                if sleep_time > 0: self._stop_event.wait(sleep_time)
-                else: next_frame_time = time.perf_counter()
+                if sleep_time > 0:
+                    self._stop_event.wait(sleep_time)
+                else:
+                    next_frame_time = time.perf_counter()
         except Exception as exc:
             self._error = exc
             self._set_status(f"DeckLink Fehler: {exc}")
             self._ready_event.set()
         finally:
             if decklink_output is not None:
-                try: decklink_output.DisableVideoOutput()
-                except Exception: pass
+                try:
+                    decklink_output.DisableVideoOutput()
+                except Exception:
+                    pass
             comtypes.CoUninitialize()
 
 
@@ -536,12 +543,15 @@ def create_decklink_input_callback(owner, decklink_api):
     from comtypes import COMObject
     class _DeckLinkInputCallback(COMObject):
         _com_interfaces_ = [decklink_api.IDeckLinkInputCallback_v14_2_1]
+
         def VideoInputFormatChanged(self, notificationEvents, newDisplayMode, detectedSignalFlags):
             owner._on_video_format_changed(newDisplayMode, detectedSignalFlags)
             return 0
+
         def VideoInputFrameArrived(self, videoFrame, audioPacket):
             if videoFrame: owner._on_video_frame(videoFrame)
             return 0
+
     return _DeckLinkInputCallback()
 
 
@@ -572,15 +582,18 @@ class DeckLinkLiveInput:
             iterator = CreateObject(decklink_api.CDeckLinkIterator, interface=decklink_api.IDeckLinkIterator)
             devices = []
             while True:
-                try: decklink = iterator.Next()
-                except Exception: break
+                try:
+                    decklink = iterator.Next()
+                except Exception:
+                    break
                 if not decklink: break
                 try:
                     attributes = decklink.QueryInterface(decklink_api.IDeckLinkProfileAttributes)
                     io_support = int(attributes.GetInt(decklink_api.BMDDeckLinkVideoIOSupport))
                     if not (io_support & int(decklink_api.bmdDeviceSupportsCapture)): continue
                     devices.append(str(decklink.GetDisplayName()))
-                except Exception: continue
+                except Exception:
+                    continue
             return devices
         finally:
             comtypes.CoUninitialize()
@@ -596,8 +609,10 @@ class DeckLinkLiveInput:
 
         decklink = None
         while True:
-            try: candidate = iterator.Next()
-            except Exception: break
+            try:
+                candidate = iterator.Next()
+            except Exception:
+                break
             if not candidate: break
             try:
                 name = str(candidate.GetDisplayName())
@@ -606,7 +621,8 @@ class DeckLinkLiveInput:
                 if name == self.device_name and (io_support & int(self._decklink_api.bmdDeviceSupportsCapture)):
                     decklink = candidate
                     break
-            except Exception: continue
+            except Exception:
+                continue
 
         if decklink is None: raise RuntimeError(f"DeckLink Input nicht gefunden: {self.device_name}")
 
@@ -618,18 +634,25 @@ class DeckLinkLiveInput:
             self._decklink_api.bmdVideoConnectionUnspecified, display_mode, pixel_format,
             self._decklink_api.bmdNoVideoInputConversion, self._decklink_api.bmdSupportedVideoModeDefault,
         )
-        if not supported: raise RuntimeError(f"{self.device_name} unterstuetzt {self.mode_label} als DeckLink Input nicht.")
+        if not supported: raise RuntimeError(
+            f"{self.device_name} unterstuetzt {self.mode_label} als DeckLink Input nicht.")
 
         self._callback = create_decklink_input_callback(self, self._decklink_api)
         self._decklink_input.SetCallback(self._callback)
         self._input_pixel_format = pixel_format
-        self._input_flags = getattr(self._decklink_api, "bmdVideoInputEnableFormatDetection", self._decklink_api.bmdVideoInputFlagDefault)
-        self._decklink_input.EnableVideoInput(display_mode, pixel_format, self._input_flags)
+        self._input_flags = 0
+
+        self._decklink_input.EnableVideoInput(
+            display_mode,
+            pixel_format,
+            self._input_flags,
+        )
         self._decklink_input.StartStreams()
         self._opened = True
         return True
 
-    def isOpened(self): return self._opened
+    def isOpened(self):
+        return self._opened
 
     def get(self, prop):
         if prop == cv2.CAP_PROP_FRAME_WIDTH: return float(self.width)
@@ -651,45 +674,66 @@ class DeckLinkLiveInput:
 
     def release(self):
         self._opened = False
-        with self._frame_ready: self._frame_ready.notify_all()
+        with self._frame_ready:
+            self._frame_ready.notify_all()
         if self._decklink_input is not None:
-            try: self._decklink_input.StopStreams()
-            except Exception: pass
-            try: self._decklink_input.SetCallback(None)
-            except Exception: pass
-            try: self._decklink_input.DisableVideoInput()
-            except Exception: pass
+            try:
+                self._decklink_input.StopStreams()
+            except Exception:
+                pass
+            try:
+                self._decklink_input.SetCallback(None)
+            except Exception:
+                pass
+            try:
+                self._decklink_input.DisableVideoInput()
+            except Exception:
+                pass
         self._decklink_input = None
         self._callback = None
         if self._com_initialized:
             try:
                 import comtypes
                 comtypes.CoUninitialize()
-            except Exception: pass
+            except Exception:
+                pass
             self._com_initialized = False
 
     def _on_video_frame(self, video_frame):
         try:
             try:
                 no_signal_flag = getattr(self._decklink_api, "bmdFrameHasNoInputSource", 0)
-                if int(video_frame.GetFlags()) & int(no_signal_flag): return
-            except Exception: pass
+                if int(video_frame.GetFlags()) & int(no_signal_flag):
+                    return
+            except Exception:
+                pass
+
             width = int(video_frame.GetWidth())
             height = int(video_frame.GetHeight())
             row_bytes = int(video_frame.GetRowBytes())
-            try: pixel_format = video_frame.GetPixelFormat()
-            except Exception: pixel_format = self._input_pixel_format
+
+            try:
+                pixel_format = video_frame.GetPixelFormat()
+            except Exception:
+                pixel_format = self._input_pixel_format
+
             buffer_ptr = video_frame.GetBytes()
-            if hasattr(buffer_ptr, "value"): buffer_ptr = buffer_ptr.value
+            if hasattr(buffer_ptr, "value"):
+                buffer_ptr = buffer_ptr.value
+
             raw = ctypes.string_at(buffer_ptr, row_bytes * height)
+
             if pixel_format == self._decklink_api.bmdFormat8BitBGRA:
                 bgra = np.frombuffer(raw, dtype=np.uint8).reshape((height, row_bytes // 4, 4))[:, :width, :]
                 rgb = cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGB).copy()
             elif pixel_format == self._decklink_api.bmdFormat8BitYUV:
                 uyvy = np.frombuffer(raw, dtype=np.uint8).reshape((height, row_bytes // 2, 2))[:, :width, :]
                 rgb = cv2.cvtColor(uyvy, cv2.COLOR_YUV2RGB_UYVY).copy()
-            else: return
-        except Exception: return
+            else:
+                return
+
+        except Exception as e:
+            return
 
         with self._frame_ready:
             self._latest_rgb = rgb
@@ -705,15 +749,20 @@ class DeckLinkLiveInput:
                 try:
                     frame_duration, time_scale = new_display_mode.GetFrameRate()
                     if frame_duration: self.fps = float(time_scale) / float(frame_duration)
-                except Exception: pass
+                except Exception:
+                    pass
 
                 rgb_flag = getattr(self._decklink_api, "bmdDetectedVideoInputRGB444", 0)
-                if int(detected_signal_flags) & int(rgb_flag): pixel_format = self._decklink_api.bmdFormat8BitBGRA
-                else: pixel_format = self._decklink_api.bmdFormat8BitYUV
+                if int(detected_signal_flags) & int(rgb_flag):
+                    pixel_format = self._decklink_api.bmdFormat8BitBGRA
+                else:
+                    pixel_format = self._decklink_api.bmdFormat8BitYUV
 
                 self._decklink_input.StopStreams()
-                try: self._decklink_input.FlushStreams()
-                except Exception: pass
+                try:
+                    self._decklink_input.FlushStreams()
+                except Exception:
+                    pass
                 self._decklink_input.DisableVideoInput()
                 self._decklink_input.EnableVideoInput(display_mode, pixel_format, self._input_flags)
                 self._input_pixel_format = pixel_format
@@ -721,7 +770,8 @@ class DeckLinkLiveInput:
                     self._latest_rgb = None
                     self._frame_ready.notify_all()
                 self._decklink_input.StartStreams()
-            except Exception: pass
+            except Exception:
+                pass
 
 
 def _center_crop_resize_rgb(image_rgb: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
@@ -750,12 +800,12 @@ class RVMByteDanceModel:
         try:
             import torch
         except ImportError as exc:
-            raise RuntimeError("RVM benoetigt PyTorch. Installiere: pip install torch torchvision") from exc
+            raise RuntimeError("RVM benoetigt PyTorch.") from exc
 
         self.torch = torch
         _optimize_torch_cuda(torch)
         self.input_size = int(input_size)
-        
+
         if force_device == "cpu":
             self.device = torch.device("cpu")
             self.device_label = "CPU"
@@ -768,21 +818,26 @@ class RVMByteDanceModel:
             self.device_hint = None
         else:
             self.device, self.device_label, self.device_hint = _select_torch_device(torch)
-            
+
         self.rec = [None, None, None, None]
         with quiet_terminal_output():
-            self.model = torch.hub.load("PeterL1n/RobustVideoMatting", "mobilenetv3", pretrained=True, trust_repo=True, verbose=False)
-        
+            self.model = torch.hub.load("PeterL1n/RobustVideoMatting", "mobilenetv3", pretrained=True, trust_repo=True,
+                                        verbose=False)
+
         self.model.to(self.device)
         self.model.eval()
 
         self.use_autocast = self.device_label == "CUDA"
         if self.device_label in ("CUDA", "DirectML"):
-            try: self.model = self.model.half()
-            except Exception: pass
-        try: self.model = self.model.to(memory_format=torch.channels_last)
-        except Exception: pass
-        
+            try:
+                self.model = self.model.half()
+            except Exception:
+                pass
+        try:
+            self.model = self.model.to(memory_format=torch.channels_last)
+        except Exception:
+            pass
+
         self.compile_status = None
         self.model, self.compile_status = _maybe_compile_torch_model(torch, self.model, self.device_label)
 
@@ -792,21 +847,29 @@ class RVMByteDanceModel:
         scale = min(1.0, float(self.input_size) / max(h, w))
         model_w = max(32, int(w * scale) // 32 * 32)
         model_h = max(32, int(h * scale) // 32 * 32)
-        
+
         tensor = torch.from_numpy(np.ascontiguousarray(rgb_frame)).permute(2, 0, 1).unsqueeze(0)
         tensor = tensor.to(self.device) / 255.0
         if tensor.shape[-2:] != (model_h, model_w):
-            tensor = torch.nn.functional.interpolate(tensor, size=(model_h, model_w), mode="bilinear", align_corners=False)
-        try: tensor = tensor.contiguous(memory_format=torch.channels_last)
-        except Exception: pass
+            tensor = torch.nn.functional.interpolate(tensor, size=(model_h, model_w), mode="bilinear",
+                                                     align_corners=False)
+        try:
+            tensor = tensor.contiguous(memory_format=torch.channels_last)
+        except Exception:
+            pass
+
+        if getattr(self, '_last_shape', None) != (model_h, model_w):
+            self.rec = [None, None, None, None]
+            self._last_shape = (model_h, model_w)
 
         with torch.inference_mode():
             try:
                 if self.use_autocast:
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        _, pha, *self.rec = self.model(tensor, *self.rec, downsample_ratio=0.15)
+                        # FIX: downsample_ratio auf 0.5 für signifikant reduzierte Latenz & stabile Erkennung
+                        _, pha, *self.rec = self.model(tensor, *self.rec, downsample_ratio=0.5)
                 else:
-                    _, pha, *self.rec = self.model(tensor, *self.rec, downsample_ratio=0.15)
+                    _, pha, *self.rec = self.model(tensor, *self.rec, downsample_ratio=0.5)
             except Exception as exc:
                 fallback_model = _disable_failed_torch_compile(self.model)
                 if fallback_model is self.model: raise
@@ -814,9 +877,9 @@ class RVMByteDanceModel:
                 self.compile_status = f"torch.compile deaktiviert: {exc}"
                 if self.use_autocast:
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        _, pha, *self.rec = self.model(tensor, *self.rec, downsample_ratio=0.15)
+                        _, pha, *self.rec = self.model(tensor, *self.rec, downsample_ratio=0.5)
                 else:
-                    _, pha, *self.rec = self.model(tensor, *self.rec, downsample_ratio=0.15)
+                    _, pha, *self.rec = self.model(tensor, *self.rec, downsample_ratio=0.5)
 
         mask = pha[0, 0].detach().float().cpu().numpy()
         return np.clip(mask * 255.0, 0, 255).astype(np.uint8)
@@ -833,11 +896,6 @@ def create_segmentation_model(model_name, force_device=None, input_size=None):
 
 class CorridorKeyRefiner:
     def __init__(self, device_mode="Automatisch", img_size=CORRIDORKEY_IMG_SIZE):
-        required_modules = ["torch", "timm", "safetensors", "huggingface_hub", "CorridorKeyModule"]
-        missing_modules = [name for name in required_modules if importlib.util.find_spec(name) is None]
-        if missing_modules:
-            raise RuntimeError(f"CorridorKey benoetigt Module. Fehlend: {', '.join(missing_modules)}")
-
         import torch
         from huggingface_hub import hf_hub_download
         from CorridorKeyModule import CorridorKeyEngine
@@ -855,11 +913,13 @@ class CorridorKeyRefiner:
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(checkpoint_dir, CORRIDORKEY_CHECKPOINT_FILE)
         if not os.path.exists(checkpoint_path):
-            checkpoint_path = hf_hub_download(repo_id=CORRIDORKEY_CHECKPOINT_REPO, filename=CORRIDORKEY_CHECKPOINT_FILE, local_dir=checkpoint_dir)
+            checkpoint_path = hf_hub_download(repo_id=CORRIDORKEY_CHECKPOINT_REPO, filename=CORRIDORKEY_CHECKPOINT_FILE,
+                                              local_dir=checkpoint_dir)
 
         os.environ.setdefault("CORRIDORKEY_SKIP_COMPILE", "1")
         with quiet_terminal_output():
-            self.engine = CorridorKeyEngine(checkpoint_path=checkpoint_path, device=self.device, img_size=self.img_size, mixed_precision=self.device == "cuda")
+            self.engine = CorridorKeyEngine(checkpoint_path=checkpoint_path, device=self.device, img_size=self.img_size,
+                                            mixed_precision=self.device == "cuda")
 
     @staticmethod
     def _resolve_device(torch, device_mode):
@@ -882,7 +942,8 @@ class CorridorKeyRefiner:
         refined_alpha = result.get("alpha")
         refined_fg = result.get("fg")
         if processed_rgba is not None:
-            processed_rgba = np.nan_to_num(processed_rgba, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32, copy=False)
+            processed_rgba = np.nan_to_num(processed_rgba, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32,
+                                                                                                   copy=False)
             if processed_rgba.ndim == 3 and processed_rgba.shape[2] >= 4:
                 processed_alpha = np.clip(processed_rgba[:, :, 3], 0.0, 1.0)
                 premul_linear_rgb = np.clip(processed_rgba[:, :, :3], 0.0, None)
@@ -913,11 +974,10 @@ class FoolproofSyncApp:
         self.model_name = ctk.StringVar(value=MODEL_OPTIONS[0])
         self.main_ai_device_mode = ctk.StringVar(value=MAIN_AI_DEVICE_OPTIONS[0])
         self.main_ai_input_size = ctk.StringVar(value="768")
-        
-        # Batching default to 1 for live latency
+
         self.main_ai_parallel_frames = ctk.IntVar(value=1)
         self.model_lock = threading.Lock()
-        
+
         self.segmenter = create_segmentation_model(
             self.model_name.get(),
             self._resolve_main_ai_force_device(),
@@ -937,7 +997,7 @@ class FoolproofSyncApp:
         self.custom_background_source = None
         self.checker_background_source = None
         self.force_bg_update = False
-        
+
         self.corridor_enabled = ctk.BooleanVar(value=False)
         self.corridor_device_mode = ctk.StringVar(value=CORRIDORKEY_DEVICE_OPTIONS[0])
         self.corridor_despill_strength = ctk.DoubleVar(value=0.45)
@@ -975,7 +1035,8 @@ class FoolproofSyncApp:
         self.post_status = ctk.StringVar(value="Bereit")
         self.post_is_processing = False
 
-        decklink_devices = run_with_timeout(get_decklink_output_devices, ["Keine DeckLink-Ausgabe gefunden"], timeout=5.0)
+        decklink_devices = run_with_timeout(get_decklink_output_devices, ["Keine DeckLink-Ausgabe gefunden"],
+                                            timeout=5.0)
 
         self.live_output_enabled = ctk.BooleanVar(value=True)
         default_out = next((d for d in decklink_devices if "DeckLink Duo (3)" in d), decklink_devices[0])
@@ -1006,38 +1067,29 @@ class FoolproofSyncApp:
         return None
 
     def _resolve_main_ai_input_size(self):
-        try: return int(self.main_ai_input_size.get())
-        except Exception: return 768
+        try:
+            return int(self.main_ai_input_size.get())
+        except Exception:
+            return 768
 
     def _apply_live_main_ai_input_size(self, size):
         size = int(size)
         self.main_ai_input_size.set(str(size))
         with self.model_lock:
             if self.segmenter is not None and hasattr(self.segmenter, "input_size"):
-                try: self.segmenter.input_size = size
-                except Exception: pass
+                try:
+                    self.segmenter.input_size = size
+                except Exception:
+                    pass
         self._main_ai_auto_tune_last_change = time.perf_counter()
-        self._main_ai_auto_tune_note = f"Auto Live-Tuning: Aufloesung auf {size} reduziert"
-        try: self.main_ai_input_select.set(str(size))
-        except Exception: pass
-        try: self.model_status_label.configure(text=f"{self.model_status}\n{self._main_ai_auto_tune_note}")
-        except Exception: pass
+        try:
+            self.main_ai_input_select.set(str(size))
+        except Exception:
+            pass
 
     def _maybe_auto_tune_main_ai_input_size(self, source_fps, processed_fps, avg_total_ms):
-        if not self.is_running: return
-        now = time.perf_counter()
-        if self._perf_total_frames < max(20, int(source_fps * 3.0)): return
-        if now - self._main_ai_auto_tune_last_change < 5.0: return
-        current_size = self._resolve_main_ai_input_size()
-        if current_size <= 512: return
-        if source_fps <= 1.0: return
-
-        target_frame_ms = 1000.0 / source_fps
-        overloaded = processed_fps < source_fps * 0.72 or avg_total_ms > target_frame_ms * 2.5
-        if not overloaded: return
-
-        next_size = 768 if current_size > 768 else 512
-        self.root.after(0, lambda s=next_size: self._apply_live_main_ai_input_size(s))
+        # FIX: Auto-Tuning komplett deaktiviert, damit die 4090 konstant auf voller Auflösung bleibt!
+        return
 
     def _main_ai_device_mode_note(self):
         return self.main_ai_device_mode.get()
@@ -1046,8 +1098,10 @@ class FoolproofSyncApp:
         return f"Batch {int(self.main_ai_parallel_frames.get())}"
 
     def change_main_ai_input_size(self, choice):
-        try: size = int(choice)
-        except Exception: size = self._resolve_main_ai_input_size()
+        try:
+            size = int(choice)
+        except Exception:
+            size = self._resolve_main_ai_input_size()
         self.main_ai_input_size.set(str(size))
         if self.is_running:
             self._stop_camera_internal(preserve_preview=True)
@@ -1061,7 +1115,8 @@ class FoolproofSyncApp:
         )
 
     def _start_main_ai_workers(self, session_id):
-        batch_size = max(1, int(self.main_ai_parallel_frames.get()))
+        # FIX: Batch-Size hart auf 1 fixiert, um Berechnungsstau und Frame-Jitter im Live-Betrieb zu unterbinden
+        batch_size = 1
         self._main_ai_worker_count = batch_size
         self._main_ai_queue_drops = 0
         self._main_ai_job_queue = queue.Queue(maxsize=max(8, batch_size * 4))
@@ -1079,11 +1134,15 @@ class FoolproofSyncApp:
         queue_obj = self._main_ai_job_queue
         if queue_obj is not None:
             for _ in range(len(self._main_ai_worker_threads) + 1):
-                try: queue_obj.put_nowait(None)
-                except Exception: break
+                try:
+                    queue_obj.put_nowait(None)
+                except Exception:
+                    break
         for thread in self._main_ai_worker_threads:
-            try: thread.join(timeout=0.3)
-            except Exception: pass
+            try:
+                thread.join(timeout=0.3)
+            except Exception:
+                pass
         self._main_ai_worker_threads = []
         self._main_ai_job_queue = None
 
@@ -1093,17 +1152,21 @@ class FoolproofSyncApp:
         try:
             queue_obj.put_nowait(job)
             return
-        except queue.Full: pass
+        except queue.Full:
+            pass
 
         dropped = 0
         try:
             while True:
                 old_job = queue_obj.get_nowait()
                 if old_job is not None: dropped += 1
-        except queue.Empty: pass
+        except queue.Empty:
+            pass
         if dropped: self._main_ai_queue_drops += dropped
-        try: queue_obj.put_nowait(job)
-        except Exception: pass
+        try:
+            queue_obj.put_nowait(job)
+        except Exception:
+            pass
 
     def _process_main_ai_frame(self, rgb_frame, engine, bg_cache=None, last_bg_mode=None):
         infer_start = time.perf_counter()
@@ -1116,9 +1179,10 @@ class FoolproofSyncApp:
         post_ms = (time.perf_counter() - post_start) * 1000.0
 
         compose_start = time.perf_counter()
-        output_final, bg_cache, last_bg_mode = self._compose_processed_frame(compose_rgb_frame, alpha_2d, bg_cache, last_bg_mode)
+        output_final, bg_cache, last_bg_mode = self._compose_processed_frame(compose_rgb_frame, alpha_2d, bg_cache,
+                                                                             last_bg_mode)
         compose_ms = (time.perf_counter() - compose_start) * 1000.0
-        
+
         total_ms = infer_ms + post_ms + compose_ms
         return output_final, alpha_2d, bg_cache, last_bg_mode, infer_ms, post_ms, compose_ms, total_ms
 
@@ -1130,18 +1194,19 @@ class FoolproofSyncApp:
         masks = engine.predict_masks_batch(frames)
         infer_ms_total = (time.perf_counter() - infer_start) * 1000.0
         infer_ms_each = infer_ms_total / max(1, len(jobs))
-        
+
         results = []
         for job, mask_binary in zip(jobs, masks):
             post_start = time.perf_counter()
             alpha_2d = self._postprocess_to_alpha(job["rgb_frame"], mask_binary)
             compose_rgb_frame, alpha_2d = self._apply_corridor_key(job["rgb_frame"], alpha_2d)
             post_ms = (time.perf_counter() - post_start) * 1000.0
-            
+
             compose_start = time.perf_counter()
-            output_final, bg_cache, last_bg_mode = self._compose_processed_frame(compose_rgb_frame, alpha_2d, bg_cache, last_bg_mode)
+            output_final, bg_cache, last_bg_mode = self._compose_processed_frame(compose_rgb_frame, alpha_2d, bg_cache,
+                                                                                 last_bg_mode)
             compose_ms = (time.perf_counter() - compose_start) * 1000.0
-            
+
             total_ms = (time.perf_counter() - job["frame_start"]) * 1000.0
             results.append({
                 "session_id": job["session_id"],
@@ -1169,13 +1234,15 @@ class FoolproofSyncApp:
         processed_frame = result["processed_frame"]
         self._set_latest_display(rgb_frame, alpha_2d, processed_frame)
         self.write_live_output_frame(rgb_frame, alpha_2d, processed_frame)
-        self._update_perf_metrics(result["source_shape"], result["total_ms"], result["infer_ms"], result["post_ms"], result["compose_ms"])
+        self._update_perf_metrics(result["source_shape"], result["total_ms"], result["infer_ms"], result["post_ms"],
+                                  result["compose_ms"])
 
     def _handle_main_ai_worker_error(self, error):
         if not self.is_running: return
         self.is_running = False
         self._main_ai_stop_event.set()
-        self.root.after(0, lambda e=error: self.video_label.configure(image=self.empty_dummy_image, text=f"Modellfehler: {e}"))
+        self.root.after(0, lambda e=error: self.video_label.configure(image=self.empty_dummy_image,
+                                                                      text=f"Modellfehler: {e}"))
 
     def _collect_main_ai_batch(self, first_job):
         batch_size = max(1, int(self.main_ai_parallel_frames.get()))
@@ -1187,7 +1254,8 @@ class FoolproofSyncApp:
                 if job is None: continue
                 if job.get("session_id") != first_job.get("session_id"): continue
                 drained.append(job)
-        except queue.Empty: pass
+        except queue.Empty:
+            pass
         if drained:
             combined = jobs + drained
             keep = combined[-batch_size:]
@@ -1200,8 +1268,10 @@ class FoolproofSyncApp:
         while len(jobs) < batch_size:
             remaining = deadline - time.perf_counter()
             if remaining <= 0: break
-            try: job = self._main_ai_job_queue.get(timeout=remaining)
-            except queue.Empty: break
+            try:
+                job = self._main_ai_job_queue.get(timeout=remaining)
+            except queue.Empty:
+                break
             if job is None: break
             if job.get("session_id") != first_job.get("session_id"): continue
             jobs.append(job)
@@ -1211,8 +1281,10 @@ class FoolproofSyncApp:
         bg_cache = None
         last_bg_mode = None
         while not self._main_ai_stop_event.is_set():
-            try: job = self._main_ai_job_queue.get(timeout=0.1)
-            except queue.Empty: continue
+            try:
+                job = self._main_ai_job_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
             if job is None: return
             if job.get("session_id") != session_id: continue
 
@@ -1234,7 +1306,8 @@ class FoolproofSyncApp:
         return base + "\n" + "\n".join(details) if details else base
 
     def setup_gui(self):
-        self.video_label = ctk.CTkLabel(self.root, text="Kamera gestoppt", width=self.ui_w, height=self.ui_h, fg_color="#2b2b2b")
+        self.video_label = ctk.CTkLabel(self.root, text="Kamera gestoppt", width=self.ui_w, height=self.ui_h,
+                                        fg_color="#2b2b2b")
         self.video_label.pack(side="left", padx=20, pady=20, expand=True, fill="both")
 
         control_panel = ctk.CTkScrollableFrame(self.root, width=340)
@@ -1244,72 +1317,103 @@ class FoolproofSyncApp:
         title.pack(pady=15)
 
         ctk.CTkLabel(control_panel, text="AI-Modell", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(5, 5))
-        self.model_select = ctk.CTkOptionMenu(control_panel, values=MODEL_OPTIONS, variable=self.model_name, command=self.change_model)
+        self.model_select = ctk.CTkOptionMenu(control_panel, values=MODEL_OPTIONS, variable=self.model_name,
+                                              command=self.change_model)
         self.model_select.pack(pady=5, padx=10, fill="x")
 
         ctk.CTkLabel(control_panel, text="Hardware", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(4, 0))
-        self.main_ai_device_select = ctk.CTkOptionMenu(control_panel, values=MAIN_AI_DEVICE_OPTIONS, variable=self.main_ai_device_mode, command=self.change_main_ai_device)
+        self.main_ai_device_select = ctk.CTkOptionMenu(control_panel, values=MAIN_AI_DEVICE_OPTIONS,
+                                                       variable=self.main_ai_device_mode,
+                                                       command=self.change_main_ai_device)
         self.main_ai_device_select.pack(pady=(3, 6), padx=10, fill="x")
 
         ctk.CTkLabel(control_panel, text="Aufloesung", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(4, 0))
-        self.main_ai_input_select = ctk.CTkOptionMenu(control_panel, values=MAIN_AI_INPUT_SIZE_OPTIONS, variable=self.main_ai_input_size, command=self.change_main_ai_input_size)
+        self.main_ai_input_select = ctk.CTkOptionMenu(control_panel, values=MAIN_AI_INPUT_SIZE_OPTIONS,
+                                                      variable=self.main_ai_input_size,
+                                                      command=self.change_main_ai_input_size)
         self.main_ai_input_select.pack(pady=(3, 6), padx=10, fill="x")
 
         self.model_status_label = ctk.CTkLabel(control_panel, text=self.model_status, wraplength=300, justify="left")
         self.model_status_label.pack(pady=(0, 10), padx=10, fill="x")
 
         ctk.CTkLabel(control_panel, text="Fensteransicht", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 5))
-        self.view_switch = ctk.CTkSegmentedButton(control_panel, values=["Input", "Alpha Matte", "Processed"], variable=self.view_mode)
+        self.view_switch = ctk.CTkSegmentedButton(control_panel, values=["Input", "Alpha Matte", "Processed"],
+                                                  variable=self.view_mode)
         self.view_switch.pack(pady=(0, 10), padx=10, fill="x")
 
-        ctk.CTkLabel(control_panel, text="Hintergrund-Effekt", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 5))
-        rb_checker = ctk.CTkRadioButton(control_panel, text="Karo-Muster (Transparenz)", variable=self.bg_mode, value="Checker")
+        ctk.CTkLabel(control_panel, text="Hintergrund-Effekt", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            pady=(10, 5))
+        rb_checker = ctk.CTkRadioButton(control_panel, text="Karo-Muster (Transparenz)", variable=self.bg_mode,
+                                        value="Checker")
         rb_checker.pack(pady=5, anchor="w", padx=20)
-        rb_transparent = ctk.CTkRadioButton(control_panel, text="Echt Transparent", variable=self.bg_mode, value="Transparent")
+        rb_transparent = ctk.CTkRadioButton(control_panel, text="Echt Transparent", variable=self.bg_mode,
+                                            value="Transparent")
         rb_transparent.pack(pady=5, anchor="w", padx=20)
-        rb_green = ctk.CTkRadioButton(control_panel, text="Virtueller Greenscreen", variable=self.bg_mode, value="Green")
+        rb_green = ctk.CTkRadioButton(control_panel, text="Virtueller Greenscreen", variable=self.bg_mode,
+                                      value="Green")
         rb_green.pack(pady=5, anchor="w", padx=20)
-        rb_custom = ctk.CTkRadioButton(control_panel, text="Eigenes Hintergrundbild", variable=self.bg_mode, value="CustomImage")
+        rb_custom = ctk.CTkRadioButton(control_panel, text="Eigenes Hintergrundbild", variable=self.bg_mode,
+                                       value="CustomImage")
         rb_custom.pack(pady=5, anchor="w", padx=20)
 
-        self.btn_load_bg = ctk.CTkButton(control_panel, text="Finder oeffnen & Bild laden", command=self.trigger_background_load, state="disabled")
+        self.btn_load_bg = ctk.CTkButton(control_panel, text="Finder oeffnen & Bild laden",
+                                         command=self.trigger_background_load, state="disabled")
         self.btn_load_bg.pack(pady=(5, 10), padx=20, fill="x")
 
-        self.corridor_header = ctk.CTkLabel(control_panel, text="CorridorKey Greenscreen", font=ctk.CTkFont(size=14, weight="bold"))
+        self.corridor_header = ctk.CTkLabel(control_panel, text="CorridorKey Greenscreen",
+                                            font=ctk.CTkFont(size=14, weight="bold"))
         self.corridor_header.pack(pady=(12, 5))
-        self.chk_corridor_enabled = ctk.CTkCheckBox(control_panel, text="CorridorKey-Refinement aktiv", variable=self.corridor_enabled, command=self.toggle_corridor_key)
+        self.chk_corridor_enabled = ctk.CTkCheckBox(control_panel, text="CorridorKey-Refinement aktiv",
+                                                    variable=self.corridor_enabled, command=self.toggle_corridor_key)
         self.chk_corridor_enabled.pack(pady=(0, 6), padx=20, anchor="w")
-        ctk.CTkLabel(control_panel, text="CorridorKey Hardware", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(4, 0))
-        self.corridor_device_select = ctk.CTkOptionMenu(control_panel, values=CORRIDORKEY_DEVICE_OPTIONS, variable=self.corridor_device_mode, command=self.change_corridor_device)
+        ctk.CTkLabel(control_panel, text="CorridorKey Hardware", font=ctk.CTkFont(size=12, weight="bold")).pack(
+            pady=(4, 0))
+        self.corridor_device_select = ctk.CTkOptionMenu(control_panel, values=CORRIDORKEY_DEVICE_OPTIONS,
+                                                        variable=self.corridor_device_mode,
+                                                        command=self.change_corridor_device)
         self.corridor_device_select.pack(pady=(3, 6), padx=10, fill="x")
-        ctk.CTkLabel(control_panel, text="CorridorKey Despill", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(4, 0))
-        self.corridor_despill_slider = ctk.CTkSlider(control_panel, from_=0.0, to=1.0, number_of_steps=20, variable=self.corridor_despill_strength, command=lambda _value: self._update_corridor_status_settings())
+        ctk.CTkLabel(control_panel, text="CorridorKey Despill", font=ctk.CTkFont(size=12, weight="bold")).pack(
+            pady=(4, 0))
+        self.corridor_despill_slider = ctk.CTkSlider(control_panel, from_=0.0, to=1.0, number_of_steps=20,
+                                                     variable=self.corridor_despill_strength,
+                                                     command=lambda _value: self._update_corridor_status_settings())
         self.corridor_despill_slider.pack(pady=(3, 6), padx=10, fill="x")
-        ctk.CTkLabel(control_panel, text="CorridorKey Despeckle", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(4, 0))
-        self.corridor_despeckle_slider = ctk.CTkSlider(control_panel, from_=0, to=1200, number_of_steps=24, variable=self.corridor_despeckle_size, command=lambda _value: self._update_corridor_status_settings())
+        ctk.CTkLabel(control_panel, text="CorridorKey Despeckle", font=ctk.CTkFont(size=12, weight="bold")).pack(
+            pady=(4, 0))
+        self.corridor_despeckle_slider = ctk.CTkSlider(control_panel, from_=0, to=1200, number_of_steps=24,
+                                                       variable=self.corridor_despeckle_size,
+                                                       command=lambda _value: self._update_corridor_status_settings())
         self.corridor_despeckle_slider.pack(pady=(3, 6), padx=10, fill="x")
-        self.corridor_status_label = ctk.CTkLabel(control_panel, textvariable=self.corridor_status, wraplength=300, justify="left")
+        self.corridor_status_label = ctk.CTkLabel(control_panel, textvariable=self.corridor_status, wraplength=300,
+                                                  justify="left")
         self.corridor_status_label.pack(pady=(0, 6), padx=10, fill="x")
 
         self.metrics_header = ctk.CTkFrame(control_panel, fg_color="transparent")
         self.metrics_header.pack(pady=(18, 5), padx=10, fill="x")
-        ctk.CTkLabel(self.metrics_header, text="Status / Metriken", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
-        self.btn_metrics_info = ctk.CTkButton(self.metrics_header, text="i", width=26, height=24, command=self.show_metrics_info)
+        ctk.CTkLabel(self.metrics_header, text="Status / Metriken", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            side="left")
+        self.btn_metrics_info = ctk.CTkButton(self.metrics_header, text="i", width=26, height=24,
+                                              command=self.show_metrics_info)
         self.btn_metrics_info.pack(side="right")
-        self.metrics_label = ctk.CTkLabel(control_panel, text=self.metrics_text, font=ctk.CTkFont(family="Consolas", size=12), justify="left", anchor="w", wraplength=300)
+        self.metrics_label = ctk.CTkLabel(control_panel, text=self.metrics_text,
+                                          font=ctk.CTkFont(family="Consolas", size=12), justify="left", anchor="w",
+                                          wraplength=300)
         self.metrics_label.pack(pady=(0, 8), padx=10, fill="x")
 
         ctk.CTkLabel(control_panel, text="Optimierung", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(12, 5))
-        ctk.CTkLabel(control_panel, text="Kanten-Schrumpfung", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(8, 0))
+        ctk.CTkLabel(control_panel, text="Kanten-Schrumpfung", font=ctk.CTkFont(size=12, weight="bold")).pack(
+            pady=(8, 0))
         self.slider_erode = ctk.CTkSlider(control_panel, from_=0, to=10, number_of_steps=10, variable=self.edge_erode)
         self.slider_erode.pack(pady=5, padx=10, fill="x")
 
-        ctk.CTkLabel(control_panel, text="Kanten-Weichheit", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(10, 0))
+        ctk.CTkLabel(control_panel, text="Kanten-Weichheit", font=ctk.CTkFont(size=12, weight="bold")).pack(
+            pady=(10, 0))
         self.slider_soft = ctk.CTkSlider(control_panel, from_=1, to=21, number_of_steps=10, variable=self.edge_soft)
         self.slider_soft.pack(pady=5, padx=10, fill="x")
 
         ctk.CTkLabel(control_panel, text="Arbeitsmodus", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(12, 5))
-        self.mode_switch = ctk.CTkSegmentedButton(control_panel, values=["Live", "Postproduktion"], variable=self.app_mode, command=self.change_app_mode)
+        self.mode_switch = ctk.CTkSegmentedButton(control_panel, values=["Live", "Postproduktion"],
+                                                  variable=self.app_mode, command=self.change_app_mode)
         self.mode_switch.pack(pady=(0, 10), padx=10, fill="x")
 
         self.live_frame = ctk.CTkFrame(control_panel, fg_color="transparent")
@@ -1321,54 +1425,78 @@ class FoolproofSyncApp:
         self.camera_select.set(self.current_live_source)
         self.camera_select.pack(pady=10, padx=10, fill="x")
 
-        self.btn_refresh_cameras = ctk.CTkButton(self.live_frame, text="Kameras neu suchen", command=self.refresh_cameras)
+        self.btn_refresh_cameras = ctk.CTkButton(self.live_frame, text="Kameras neu suchen",
+                                                 command=self.refresh_cameras)
         self.btn_refresh_cameras.pack(pady=5, padx=10, fill="x")
 
         self.btn_toggle = ctk.CTkButton(self.live_frame, text="Kamera Starten", command=self.toggle_camera)
         self.btn_toggle.pack(pady=10, padx=10, fill="x")
 
-        ctk.CTkLabel(self.live_frame, text="Live Output DeckLink", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(14, 5), padx=10, anchor="w")
-        self.decklink_device_select = ctk.CTkOptionMenu(self.live_frame, values=run_with_timeout(get_decklink_output_devices, ["Keine DeckLink-Ausgabe gefunden"], timeout=5.0), variable=self.live_output_device, command=lambda _choice: self.restart_live_output_if_needed())
+        ctk.CTkLabel(self.live_frame, text="Live Output DeckLink", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            pady=(14, 5), padx=10, anchor="w")
+        self.decklink_device_select = ctk.CTkOptionMenu(self.live_frame,
+                                                        values=run_with_timeout(get_decklink_output_devices,
+                                                                                ["Keine DeckLink-Ausgabe gefunden"],
+                                                                                timeout=5.0),
+                                                        variable=self.live_output_device,
+                                                        command=lambda _choice: self.restart_live_output_if_needed())
         self.decklink_device_select.pack(pady=(4, 4), padx=10, fill="x")
-        ctk.CTkLabel(self.live_frame, text="Alpha Matte SDI", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(8, 0), padx=10, anchor="w")
-        self.decklink_key_device_select = ctk.CTkOptionMenu(self.live_frame, values=run_with_timeout(get_decklink_output_devices, ["Keine DeckLink-Ausgabe gefunden"], timeout=5.0), variable=self.live_key_output_device, command=lambda _choice: self.restart_live_output_if_needed())
+        ctk.CTkLabel(self.live_frame, text="Alpha Matte SDI", font=ctk.CTkFont(size=12, weight="bold")).pack(
+            pady=(8, 0), padx=10, anchor="w")
+        self.decklink_key_device_select = ctk.CTkOptionMenu(self.live_frame,
+                                                            values=run_with_timeout(get_decklink_output_devices,
+                                                                                    ["Keine DeckLink-Ausgabe gefunden"],
+                                                                                    timeout=5.0),
+                                                            variable=self.live_key_output_device, command=lambda
+                _choice: self.restart_live_output_if_needed())
         self.decklink_key_device_select.pack(pady=(4, 4), padx=10, fill="x")
-        self.decklink_mode_select = ctk.CTkOptionMenu(self.live_frame, values=list(DECKLINK_OUTPUT_MODES.keys()), variable=self.live_output_mode, command=lambda _choice: self.restart_decklink_io_if_needed())
+        self.decklink_mode_select = ctk.CTkOptionMenu(self.live_frame, values=list(DECKLINK_OUTPUT_MODES.keys()),
+                                                      variable=self.live_output_mode,
+                                                      command=lambda _choice: self.restart_decklink_io_if_needed())
         self.decklink_mode_select.pack(pady=4, padx=10, fill="x")
-        self.btn_refresh_decklink = ctk.CTkButton(self.live_frame, text="DeckLink Geraete neu suchen", command=self.refresh_decklink_devices)
+        self.btn_refresh_decklink = ctk.CTkButton(self.live_frame, text="DeckLink Geraete neu suchen",
+                                                  command=self.refresh_decklink_devices)
         self.btn_refresh_decklink.pack(pady=4, padx=10, fill="x")
-        self.chk_live_output = ctk.CTkCheckBox(self.live_frame, text="Live Output aktiv", variable=self.live_output_enabled, command=self.toggle_live_output)
+        self.chk_live_output = ctk.CTkCheckBox(self.live_frame, text="Live Output aktiv",
+                                               variable=self.live_output_enabled, command=self.toggle_live_output)
         self.chk_live_output.pack(pady=(8, 4), padx=20, anchor="w")
-        self.chk_live_key_output = ctk.CTkCheckBox(self.live_frame, text="Alpha Matte auf zweitem SDI", variable=self.live_key_output_enabled, command=self.toggle_live_output)
+        self.chk_live_key_output = ctk.CTkCheckBox(self.live_frame, text="Alpha Matte auf zweitem SDI",
+                                                   variable=self.live_key_output_enabled,
+                                                   command=self.toggle_live_output)
         self.chk_live_key_output.pack(pady=(2, 4), padx=20, anchor="w")
-        
-        self.live_output_status_label = ctk.CTkLabel(self.live_frame, textvariable=self.live_output_status, wraplength=300, justify="left")
+
+        self.live_output_status_label = ctk.CTkLabel(self.live_frame, textvariable=self.live_output_status,
+                                                     wraplength=300, justify="left")
         self.live_output_status_label.pack(pady=(0, 8), padx=10, fill="x")
 
         self.post_frame = ctk.CTkFrame(control_panel, fg_color="transparent")
         self.btn_post_input = ctk.CTkButton(self.post_frame, text="Quelldatei waehlen", command=self.select_post_input)
         self.btn_post_input.pack(pady=(8, 4), padx=10, fill="x")
-        self.post_input_label = ctk.CTkLabel(self.post_frame, textvariable=self.post_input_path, wraplength=300, justify="left")
+        self.post_input_label = ctk.CTkLabel(self.post_frame, textvariable=self.post_input_path, wraplength=300,
+                                             justify="left")
         self.post_input_label.pack(pady=(0, 8), padx=10, fill="x")
 
-        self.btn_post_output = ctk.CTkButton(self.post_frame, text="Speicherziel waehlen", command=self.select_post_output)
+        self.btn_post_output = ctk.CTkButton(self.post_frame, text="Speicherziel waehlen",
+                                             command=self.select_post_output)
         self.btn_post_output.pack(pady=4, padx=10, fill="x")
-        self.post_output_label = ctk.CTkLabel(self.post_frame, textvariable=self.post_output_path, wraplength=300, justify="left")
+        self.post_output_label = ctk.CTkLabel(self.post_frame, textvariable=self.post_output_path, wraplength=300,
+                                              justify="left")
         self.post_output_label.pack(pady=(0, 8), padx=10, fill="x")
 
         self.post_progress = ctk.CTkProgressBar(self.post_frame)
         self.post_progress.set(0)
         self.post_progress.pack(pady=(6, 4), padx=10, fill="x")
-        self.post_status_label = ctk.CTkLabel(self.post_frame, textvariable=self.post_status, wraplength=300, justify="left")
+        self.post_status_label = ctk.CTkLabel(self.post_frame, textvariable=self.post_status, wraplength=300,
+                                              justify="left")
         self.post_status_label.pack(pady=(0, 8), padx=10, fill="x")
 
-        self.btn_post_process = ctk.CTkButton(self.post_frame, text="Datei verarbeiten", command=self.start_post_processing)
+        self.btn_post_process = ctk.CTkButton(self.post_frame, text="Datei verarbeiten",
+                                              command=self.start_post_processing)
         self.btn_post_process.pack(pady=(4, 12), padx=10, fill="x")
 
         self.bg_mode.trace_add("write", self.update_bg_button_state)
         self.view_mode.trace_add("write", self.refresh_display_view)
         self.change_app_mode(self.app_mode.get())
-
 
     def toggle_corridor_key(self):
         if not self.corridor_enabled.get():
@@ -1379,7 +1507,8 @@ class FoolproofSyncApp:
         threading.Thread(target=self._load_corridor_worker, daemon=True).start()
 
     def change_corridor_device(self, choice):
-        with self.corridor_lock: self.corridor_refiner = None
+        with self.corridor_lock:
+            self.corridor_refiner = None
         if self.corridor_enabled.get():
             self.corridor_status.set(f"CorridorKey wird auf {choice} geladen ...")
             threading.Thread(target=self._load_corridor_worker, daemon=True).start()
@@ -1388,32 +1517,40 @@ class FoolproofSyncApp:
 
     def _update_corridor_status_settings(self):
         if not self.corridor_enabled.get():
-            self.corridor_status.set(f"CorridorKey aus / Despill {self.corridor_despill_strength.get():.2f} | Despeckle {int(self.corridor_despeckle_size.get())}")
+            self.corridor_status.set(
+                f"CorridorKey aus / Despill {self.corridor_despill_strength.get():.2f} | Despeckle {int(self.corridor_despeckle_size.get())}")
             return
-        with self.corridor_lock: refiner = self.corridor_refiner
+        with self.corridor_lock:
+            refiner = self.corridor_refiner
         if refiner is None: return
-        self.corridor_status.set(f"CorridorKey bereit ({refiner.device_label}, {refiner.img_size}px)\nDespill {self.corridor_despill_strength.get():.2f} | Despeckle {int(self.corridor_despeckle_size.get())}")
+        self.corridor_status.set(
+            f"CorridorKey bereit ({refiner.device_label}, {refiner.img_size}px)\nDespill {self.corridor_despill_strength.get():.2f} | Despeckle {int(self.corridor_despeckle_size.get())}")
 
     def _load_corridor_worker(self):
         try:
             refiner = CorridorKeyRefiner(device_mode=self.corridor_device_mode.get())
-            with self.corridor_lock: self.corridor_refiner = refiner
-            self.root.after(0, lambda: self.corridor_status.set(f"CorridorKey bereit ({refiner.device_label}, {refiner.img_size}px)\nDespill {self.corridor_despill_strength.get():.2f} | Despeckle {int(self.corridor_despeckle_size.get())}"))
+            with self.corridor_lock:
+                self.corridor_refiner = refiner
+            self.root.after(0, lambda: self.corridor_status.set(
+                f"CorridorKey bereit ({refiner.device_label}, {refiner.img_size}px)\nDespill {self.corridor_despill_strength.get():.2f} | Despeckle {int(self.corridor_despeckle_size.get())}"))
         except Exception as exc:
-            with self.corridor_lock: self.corridor_refiner = None
+            with self.corridor_lock:
+                self.corridor_refiner = None
             self.root.after(0, lambda e=exc: self.corridor_status.set(f"CorridorKey Fehler: {e}"))
 
     def _apply_corridor_key(self, rgb_frame, alpha_2d):
         if not self.corridor_enabled.get(): return rgb_frame, alpha_2d
-        with self.corridor_lock: refiner = self.corridor_refiner
+        with self.corridor_lock:
+            refiner = self.corridor_refiner
         if refiner is None: return rgb_frame, alpha_2d
         try:
-            return refiner.refine(rgb_frame, alpha_2d, despill_strength=self.corridor_despill_strength.get(), despeckle_size=self.corridor_despeckle_size.get())
+            return refiner.refine(rgb_frame, alpha_2d, despill_strength=self.corridor_despill_strength.get(),
+                                  despeckle_size=self.corridor_despeckle_size.get())
         except Exception as exc:
-            with self.corridor_lock: self.corridor_refiner = None
+            with self.corridor_lock:
+                self.corridor_refiner = None
             self.root.after(0, lambda e=exc: self.corridor_status.set(f"CorridorKey Fehler: {e}"))
             return rgb_frame, alpha_2d
-
 
     def _postprocess_to_alpha(self, rgb_frame: np.ndarray, mask_u8: np.ndarray) -> np.ndarray:
         h, w = rgb_frame.shape[:2]
@@ -1446,7 +1583,8 @@ class FoolproofSyncApp:
                     alpha_core = _torch_gaussian_blur_2d(torch, F, bin_mask, soft_size).clamp(0.0, 1.0)
                     core_gate = (alpha_core > 0.03).to(torch.float32)
                     alpha = (alpha_raw * core_gate).clamp(0.0, 1.0)
-                    alpha = torch.maximum(alpha, alpha_core * 0.85)
+                    # FIX: Reduzierte Gewichtung weicher Alpha-Ränder im Mix, um Keying-Ghosting im ATEM zu verhindern
+                    alpha = torch.maximum(alpha, alpha_core * 0.40)
                     return alpha[0, 0].detach().cpu().numpy().astype(np.float32, copy=False)
         except Exception:
             pass
@@ -1472,15 +1610,19 @@ class FoolproofSyncApp:
 
         core_gate = (alpha_core > 0.03).astype(np.float32)
         alpha = np.clip(alpha_raw * core_gate, 0.0, 1.0)
-        alpha = np.maximum(alpha, alpha_core * 0.85)
+        # FIX: Symmetrische Anpassung im NumPy-Fallback
+        alpha = np.maximum(alpha, alpha_core * 0.40)
         return alpha
 
     def update_bg_button_state(self, *args):
-        if self.bg_mode.get() == "CustomImage": self.btn_load_bg.configure(state="normal")
-        else: self.btn_load_bg.configure(state="disabled")
+        if self.bg_mode.get() == "CustomImage":
+            self.btn_load_bg.configure(state="normal")
+        else:
+            self.btn_load_bg.configure(state="disabled")
 
     def _get_checker_background(self, width: int, height: int) -> np.ndarray:
-        if self.checker_background_source is None: self.checker_background_source = _generate_checker_background(1920, 1080)
+        if self.checker_background_source is None: self.checker_background_source = _generate_checker_background(1920,
+                                                                                                                 1080)
         return _center_crop_resize_rgb(self.checker_background_source, width, height)
 
     def _get_custom_background(self, width: int, height: int) -> np.ndarray:
@@ -1494,7 +1636,15 @@ class FoolproofSyncApp:
         alpha_u8 = self._alpha_to_u8(alpha_2d)
         return Image.fromarray(cv2.cvtColor(alpha_u8, cv2.COLOR_GRAY2RGB))
 
-    def _make_display_image(self, rgb_frame: np.ndarray, alpha_2d: np.ndarray, processed_frame: np.ndarray) -> Image.Image:
+    def _make_display_image(self, rgb_frame: np.ndarray, alpha_2d: np.ndarray,
+                            processed_frame: np.ndarray) -> Image.Image:
+        view_mode = self.view_mode.get()
+        if view_mode == "Input": return Image.fromarray(rgb_frame)
+        if view_mode == "Alpha Matte": return self._make_alpha_preview(alpha_2d)
+        return Image.fromarray(processed_frame)
+
+    def _make_display_image(self, rgb_frame: np.ndarray, alpha_2d: np.ndarray,
+                            processed_frame: np.ndarray) -> Image.Image:
         view_mode = self.view_mode.get()
         if view_mode == "Input": return Image.fromarray(rgb_frame)
         if view_mode == "Alpha Matte": return self._make_alpha_preview(alpha_2d)
@@ -1537,8 +1687,10 @@ class FoolproofSyncApp:
     def refresh_decklink_devices(self):
         if getattr(self, "_decklink_refresh_running", False): return
         self._decklink_refresh_running = True
-        try: self.btn_refresh_decklink.configure(text="Suche laeuft...", state="disabled")
-        except Exception: pass
+        try:
+            self.btn_refresh_decklink.configure(text="Suche laeuft...", state="disabled")
+        except Exception:
+            pass
         self.live_output_status.set("DeckLink Geraete werden gesucht ...")
 
         def worker():
@@ -1551,12 +1703,15 @@ class FoolproofSyncApp:
                 inputs = []
                 error = exc
             self.root.after(0, lambda: self._finish_decklink_refresh(values, inputs, error))
+
         threading.Thread(target=worker, name="DeckLinkRefresh", daemon=True).start()
 
     def _finish_decklink_refresh(self, values, inputs=None, error=None):
         self._decklink_refresh_running = False
-        try: self.btn_refresh_decklink.configure(text="DeckLink Geraete neu suchen", state="normal")
-        except Exception: pass
+        try:
+            self.btn_refresh_decklink.configure(text="DeckLink Geraete neu suchen", state="normal")
+        except Exception:
+            pass
         if error is not None:
             self.live_output_status.set(f"DeckLink Suche Fehler: {error}")
             return
@@ -1564,13 +1719,17 @@ class FoolproofSyncApp:
         self.decklink_device_select.configure(values=values)
         self.decklink_key_device_select.configure(values=values)
         if self.live_output_device.get() not in values: self.live_output_device.set(values[0])
-        if self.live_key_output_device.get() not in values: self.live_key_output_device.set(values[1] if len(values) > 1 else values[0])
-        
+        if self.live_key_output_device.get() not in values: self.live_key_output_device.set(
+            values[1] if len(values) > 1 else values[0])
+
         existing_sources = []
-        try: existing_sources = list(self.camera_select.cget("values") or [])
-        except Exception: pass
-        
-        non_decklink_sources = [s for s in existing_sources if s and not str(s).startswith("DeckLink: ") and s != "Keine Live-Quelle gefunden"]
+        try:
+            existing_sources = list(self.camera_select.cget("values") or [])
+        except Exception:
+            pass
+
+        non_decklink_sources = [s for s in existing_sources if
+                                s and not str(s).startswith("DeckLink: ") and s != "Keine Live-Quelle gefunden"]
         live_sources = [*non_decklink_sources, *[f"DeckLink: {name}" for name in (inputs or [])]]
         if not live_sources: live_sources = ["Keine Live-Quelle gefunden"]
         self.camera_select.configure(values=live_sources)
@@ -1580,8 +1739,10 @@ class FoolproofSyncApp:
         self.live_output_status.set("DeckLink Geraeteliste aktualisiert.")
 
     def toggle_live_output(self):
-        if self.live_output_enabled.get() or self.live_key_output_enabled.get(): self.start_live_output()
-        else: self.stop_live_output()
+        if self.live_output_enabled.get() or self.live_key_output_enabled.get():
+            self.start_live_output()
+        else:
+            self.stop_live_output()
 
     def restart_live_output_if_needed(self):
         if self.live_output_enabled.get() or self.live_key_output_enabled.get():
@@ -1640,14 +1801,19 @@ class FoolproofSyncApp:
         try:
             started = []
             if self.live_output_enabled.get():
-                self.decklink_output = DeckLinkLiveOutput(device_name, mode_label, status_callback=lambda text: self.root.after(0, lambda: self.live_output_status.set(text)))
+                self.decklink_output = DeckLinkLiveOutput(device_name, mode_label,
+                                                          status_callback=lambda text: self.root.after(0,
+                                                                                                       lambda: self.live_output_status.set(
+                                                                                                           text)))
                 self.decklink_output.start()
                 started.append(f"Fill: {device_name}")
 
             if self.live_key_output_enabled.get():
                 key_device_name = self.live_key_output_device.get()
-                if key_device_name == "Keine DeckLink-Ausgabe gefunden": raise RuntimeError("Keine zweite DeckLink-Ausgabe gefunden.")
-                if key_device_name == device_name and self.live_output_enabled.get(): raise RuntimeError("Fill und Matte muessen auf verschiedene Ausgaenge.")
+                if key_device_name == "Keine DeckLink-Ausgabe gefunden": raise RuntimeError(
+                    "Keine zweite DeckLink-Ausgabe gefunden.")
+                if key_device_name == device_name and self.live_output_enabled.get(): raise RuntimeError(
+                    "Fill und Matte muessen auf verschiedene Ausgaenge.")
                 self.decklink_key_output = DeckLinkLiveOutput(key_device_name, mode_label, status_callback=None)
                 self.decklink_key_output.start()
                 started.append(f"Key/Matte: {key_device_name}")
@@ -1693,17 +1859,23 @@ class FoolproofSyncApp:
 
     def select_post_input(self):
         from tkinter import filedialog
-        file_path = filedialog.askopenfilename(title="Datei waehlen", filetypes=[("Video/Bild", "*.mp4;*.mov;*.avi;*.mkv;*.jpg;*.jpeg;*.png;*.bmp;*.webp")])
+        file_path = filedialog.askopenfilename(title="Datei waehlen", filetypes=[
+            ("Video/Bild", "*.mp4;*.mov;*.avi;*.mkv;*.jpg;*.jpeg;*.png;*.bmp;*.webp")])
         if not file_path: return
         self.post_input_path.set(file_path)
-        if self.post_output_path.get() == "Kein Ziel gewaehlt": self.post_output_path.set(self._default_post_output_path(file_path))
+        if self.post_output_path.get() == "Kein Ziel gewaehlt": self.post_output_path.set(
+            self._default_post_output_path(file_path))
 
     def select_post_output(self):
         from tkinter import filedialog
         input_path = self.post_input_path.get()
         initial = self._default_post_output_path(input_path) if os.path.exists(input_path) else "processed_output.mp4"
         ext = os.path.splitext(initial)[1].lower()
-        file_path = filedialog.asksaveasfilename(title="Speicherziel waehlen", initialfile=os.path.basename(initial), initialdir=os.path.dirname(initial) if os.path.dirname(initial) else None, defaultextension=ext if ext else ".mp4", filetypes=[("Apple ProRes 4444 MOV", "*.mov"), ("MP4 Video", "*.mp4"), ("PNG Bild", "*.png")])
+        file_path = filedialog.asksaveasfilename(title="Speicherziel waehlen", initialfile=os.path.basename(initial),
+                                                 initialdir=os.path.dirname(initial) if os.path.dirname(
+                                                     initial) else None, defaultextension=ext if ext else ".mp4",
+                                                 filetypes=[("Apple ProRes 4444 MOV", "*.mov"), ("MP4 Video", "*.mp4"),
+                                                            ("PNG Bild", "*.png")])
         if file_path: self.post_output_path.set(file_path)
 
     def _default_post_output_path(self, input_path):
@@ -1744,8 +1916,10 @@ class FoolproofSyncApp:
     def _post_processing_worker(self, input_path, output_path):
         try:
             ext = os.path.splitext(input_path)[1].lower()
-            if ext in (".jpg", ".jpeg", ".png", ".bmp", ".webp"): self._process_post_image(input_path, output_path)
-            else: self._process_post_video(input_path, output_path)
+            if ext in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+                self._process_post_image(input_path, output_path)
+            else:
+                self._process_post_video(input_path, output_path)
             self.root.after(0, lambda: self._finish_post_processing(f"Fertig: {output_path}"))
         except Exception as exc:
             self.root.after(0, lambda e=exc: self._finish_post_processing(f"Fehler: {e}", error=True))
@@ -1761,12 +1935,15 @@ class FoolproofSyncApp:
             return output_rgba, None, current_mode
 
         if current_mode != last_bg_mode or self.force_bg_update or bg_cache is None:
-            if current_mode == "Checker": bg_cache = self._get_checker_background(w, h)
+            if current_mode == "Checker":
+                bg_cache = self._get_checker_background(w, h)
             elif current_mode == "Green":
                 bg_cache = np.zeros((h, w, 3), dtype=np.uint8)
                 bg_cache[:] = (0, 255, 0)
-            elif current_mode == "CustomImage": bg_cache = self._get_custom_background(w, h)
-            else: bg_cache = np.zeros((h, w, 3), dtype=np.uint8) + 30
+            elif current_mode == "CustomImage":
+                bg_cache = self._get_custom_background(w, h)
+            else:
+                bg_cache = np.zeros((h, w, 3), dtype=np.uint8) + 30
             last_bg_mode = current_mode
             self.force_bg_update = False
 
@@ -1795,7 +1972,8 @@ class FoolproofSyncApp:
         mask_binary = segmenter.predict_mask(rgb_frame)
         alpha_2d = self._postprocess_to_alpha(rgb_frame, mask_binary)
         compose_rgb_frame, alpha_2d = self._apply_corridor_key(rgb_frame, alpha_2d)
-        output_frame, bg_cache, last_bg_mode = self._compose_processed_frame(compose_rgb_frame, alpha_2d, bg_cache, last_bg_mode)
+        output_frame, bg_cache, last_bg_mode = self._compose_processed_frame(compose_rgb_frame, alpha_2d, bg_cache,
+                                                                             last_bg_mode)
         return output_frame, alpha_2d, bg_cache, last_bg_mode
 
     def _process_post_rgb_batch(self, rgb_frames, segmenter, bg_cache=None, last_bg_mode=None):
@@ -1805,7 +1983,8 @@ class FoolproofSyncApp:
         for rgb_frame, mask_binary in zip(rgb_frames, masks):
             alpha_2d = self._postprocess_to_alpha(rgb_frame, mask_binary)
             compose_rgb_frame, alpha_2d = self._apply_corridor_key(rgb_frame, alpha_2d)
-            output_frame, bg_cache, last_bg_mode = self._compose_processed_frame(compose_rgb_frame, alpha_2d, bg_cache, last_bg_mode)
+            output_frame, bg_cache, last_bg_mode = self._compose_processed_frame(compose_rgb_frame, alpha_2d, bg_cache,
+                                                                                 last_bg_mode)
             outputs.append((output_frame, alpha_2d))
         return outputs, bg_cache, last_bg_mode
 
@@ -1813,10 +1992,13 @@ class FoolproofSyncApp:
         image_bgr = cv2.imread(input_path, cv2.IMREAD_COLOR)
         if image_bgr is None: raise RuntimeError("Bild konnte nicht gelesen werden.")
         rgb_frame = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        with self.model_lock: segmenter = self.segmenter
+        with self.model_lock:
+            segmenter = self.segmenter
         output_frame, alpha_2d, _, _ = self._process_post_rgb_frame(rgb_frame, segmenter)
-        if output_frame.shape[2] == 4: output_to_write = cv2.cvtColor(output_frame, cv2.COLOR_RGBA2BGRA)
-        else: output_to_write = cv2.cvtColor(output_frame, cv2.COLOR_RGB2BGR)
+        if output_frame.shape[2] == 4:
+            output_to_write = cv2.cvtColor(output_frame, cv2.COLOR_RGBA2BGRA)
+        else:
+            output_to_write = cv2.cvtColor(output_frame, cv2.COLOR_RGB2BGR)
         os.makedirs(os.path.dirname(output_path), exist_ok=True) if os.path.dirname(output_path) else None
         cv2.imwrite(output_path, output_to_write)
         preview_frame = cv2.resize(rgb_frame, (self.ui_w, self.ui_h), interpolation=cv2.INTER_AREA)
@@ -1835,7 +2017,8 @@ class FoolproofSyncApp:
         try:
             import imageio_ffmpeg
             return imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception: return None
+        except Exception:
+            return None
 
     def _open_prores_4444_writer(self, output_path, width, height, fps):
         ffmpeg_path = self._find_ffmpeg_executable()
@@ -1848,7 +2031,8 @@ class FoolproofSyncApp:
         ]
         try:
             return subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        except Exception as exc: raise RuntimeError(f"FFmpeg konnte nicht gestartet werden: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"FFmpeg konnte nicht gestartet werden: {exc}") from exc
 
     def _process_post_transparent_video(self, input_path, output_path):
         cap = cv2.VideoCapture(input_path)
@@ -1865,7 +2049,8 @@ class FoolproofSyncApp:
         os.makedirs(os.path.dirname(output_path), exist_ok=True) if os.path.dirname(output_path) else None
         writer = self._open_prores_4444_writer(output_path, width, height, fps)
 
-        with self.model_lock: segmenter = self.segmenter
+        with self.model_lock:
+            segmenter = self.segmenter
 
         bg_cache = None
         last_bg_mode = None
@@ -1876,13 +2061,16 @@ class FoolproofSyncApp:
         def handle_batch(rgb_batch):
             nonlocal bg_cache, last_bg_mode, processed
             if not rgb_batch: return
-            batch_outputs, bg_cache, last_bg_mode = self._process_post_rgb_batch(rgb_batch, segmenter, bg_cache, last_bg_mode)
+            batch_outputs, bg_cache, last_bg_mode = self._process_post_rgb_batch(rgb_batch, segmenter, bg_cache,
+                                                                                 last_bg_mode)
             for rgb_frame, (output_frame, alpha_2d) in zip(rgb_batch, batch_outputs):
                 if output_frame.shape[2] != 4:
                     alpha_u8 = self._alpha_to_u8(alpha_2d)
                     output_frame = np.dstack((rgb_frame, alpha_u8))
-                try: writer.stdin.write(np.ascontiguousarray(output_frame).tobytes())
-                except Exception as exc: raise RuntimeError(f"FFmpeg Fehler: {exc}") from exc
+                try:
+                    writer.stdin.write(np.ascontiguousarray(output_frame).tobytes())
+                except Exception as exc:
+                    raise RuntimeError(f"FFmpeg Fehler: {exc}") from exc
                 processed += 1
                 if processed == 1 or processed % 10 == 0:
                     elapsed = max(0.001, time.perf_counter() - start)
@@ -1909,8 +2097,10 @@ class FoolproofSyncApp:
         finally:
             cap.release()
             if writer.stdin:
-                try: writer.stdin.close()
-                except Exception: pass
+                try:
+                    writer.stdin.close()
+                except Exception:
+                    pass
 
         stderr = writer.stderr.read().decode("utf-8", errors="replace") if writer.stderr else ""
         return_code = writer.wait()
@@ -1940,7 +2130,8 @@ class FoolproofSyncApp:
             cap.release()
             raise RuntimeError("Ausgabevideo konnte nicht erstellt werden. Nutze als Ziel am besten .mp4.")
 
-        with self.model_lock: segmenter = self.segmenter
+        with self.model_lock:
+            segmenter = self.segmenter
 
         bg_cache = None
         last_bg_mode = None
@@ -1951,10 +2142,13 @@ class FoolproofSyncApp:
         def handle_batch(rgb_batch):
             nonlocal bg_cache, last_bg_mode, processed
             if not rgb_batch: return
-            batch_outputs, bg_cache, last_bg_mode = self._process_post_rgb_batch(rgb_batch, segmenter, bg_cache, last_bg_mode)
+            batch_outputs, bg_cache, last_bg_mode = self._process_post_rgb_batch(rgb_batch, segmenter, bg_cache,
+                                                                                 last_bg_mode)
             for rgb_frame, (output_frame, alpha_2d) in zip(rgb_batch, batch_outputs):
-                if output_frame.shape[2] == 4: output_to_write = cv2.cvtColor(output_frame[:, :, :3], cv2.COLOR_RGB2BGR)
-                else: output_to_write = cv2.cvtColor(output_frame, cv2.COLOR_RGB2BGR)
+                if output_frame.shape[2] == 4:
+                    output_to_write = cv2.cvtColor(output_frame[:, :, :3], cv2.COLOR_RGB2BGR)
+                else:
+                    output_to_write = cv2.cvtColor(output_frame, cv2.COLOR_RGB2BGR)
                 writer.write(output_to_write)
                 processed += 1
                 if processed == 1 or processed % 10 == 0:
@@ -1983,7 +2177,6 @@ class FoolproofSyncApp:
             cap.release()
             writer.release()
         self.root.after(0, lambda: self._set_post_progress(1.0, f"Video fertig: {processed} Frames."))
-
 
     def show_metrics_info(self):
         info = ctk.CTkToplevel(self.root)
@@ -2017,8 +2210,10 @@ class FoolproofSyncApp:
         self._perf_last_text_update = 0.0
         self._perf_ema = {"total_ms": 0.0, "infer_ms": 0.0, "post_ms": 0.0, "compose_ms": 0.0}
         with self.metrics_lock:
-            if self.is_running: self.metrics_text = "Performance\nMesse Daten ..."
-            else: self.metrics_text = "Performance\nKamera gestoppt"
+            if self.is_running:
+                self.metrics_text = "Performance\nMesse Daten ..."
+            else:
+                self.metrics_text = "Performance\nKamera gestoppt"
 
     def _update_perf_metrics(self, frame_shape, total_ms, infer_ms, post_ms, compose_ms):
         now = time.perf_counter()
@@ -2036,17 +2231,9 @@ class FoolproofSyncApp:
 
         processed_fps = self._perf_window_frames / elapsed if elapsed > 0 else 0.0
         source_fps = self._perf_source_fps if self._perf_source_fps > 1.0 else 0.0
-        dropped_fps = max(0.0, source_fps - processed_fps)
-        dropped_percent = (dropped_fps / source_fps * 100.0) if source_fps > 0 else 0.0
 
         h, w = frame_shape[:2]
-        bytes_per_frame = int(w * h * 3)
-        incoming_mib = (bytes_per_frame * source_fps) / (1024 * 1024)
-        incoming_mbit = incoming_mib * 8.0
-        processed_mib = (bytes_per_frame * processed_fps) / (1024 * 1024)
-        processed_mbit = processed_mib * 8.0
         source_label = f"{source_fps:.1f} FPS gemessen" if source_fps > 0 else "unbekannt"
-        dropped_label = f"{dropped_fps:.1f} FPS ({dropped_percent:.0f}%)" if source_fps > 0 else "unbekannt"
 
         text = (
             "Performance\n"
@@ -2062,11 +2249,11 @@ class FoolproofSyncApp:
         if self._main_ai_auto_tune_note: text += f"\n{self._main_ai_auto_tune_note}"
         if self._perf_read_failures: text += f"\nLesefehler: {self._perf_read_failures}"
 
-        with self.metrics_lock: self.metrics_text = text
+        with self.metrics_lock:
+            self.metrics_text = text
 
         self._perf_window_start = now
         self._perf_window_frames = 0
-        self._maybe_auto_tune_main_ai_input_size(source_fps, processed_fps, self._perf_ema["total_ms"])
 
     def change_main_ai_device(self, choice):
         self.change_model(self.loaded_model_name)
@@ -2082,8 +2269,10 @@ class FoolproofSyncApp:
 
     def _load_model_worker(self, choice, restart_camera):
         try:
-            new_segmenter = create_segmentation_model(choice, self._resolve_main_ai_force_device(), self._resolve_main_ai_input_size())
-            with self.model_lock: self.segmenter = new_segmenter
+            new_segmenter = create_segmentation_model(choice, self._resolve_main_ai_force_device(),
+                                                      self._resolve_main_ai_input_size())
+            with self.model_lock:
+                self.segmenter = new_segmenter
             self.model_status = self._format_model_status(new_segmenter, choice)
             self.root.after(0, lambda: self._finish_model_load(choice, restart_camera, None))
         except Exception as exc:
@@ -2096,8 +2285,10 @@ class FoolproofSyncApp:
             self.model_name.set(choice)
             self.loaded_model_name = choice
             self.model_status_label.configure(text=self.model_status)
-            if self.app_mode.get() == "Postproduktion": self.video_label.configure(image=self.empty_dummy_image, text="Postproduktion bereit")
-            else: self.video_label.configure(image=self.empty_dummy_image, text="Kamera gestoppt")
+            if self.app_mode.get() == "Postproduktion":
+                self.video_label.configure(image=self.empty_dummy_image, text="Postproduktion bereit")
+            else:
+                self.video_label.configure(image=self.empty_dummy_image, text="Kamera gestoppt")
             if restart_camera: self.root.after(300, self._start_camera_internal)
             return
 
@@ -2109,8 +2300,10 @@ class FoolproofSyncApp:
     def refresh_cameras(self):
         if getattr(self, "_camera_refresh_running", False): return
         self._camera_refresh_running = True
-        try: self.btn_refresh_cameras.configure(text="Suche laeuft...", state="disabled")
-        except Exception: pass
+        try:
+            self.btn_refresh_cameras.configure(text="Suche laeuft...", state="disabled")
+        except Exception:
+            pass
 
         def worker():
             try:
@@ -2130,8 +2323,10 @@ class FoolproofSyncApp:
 
     def _finish_camera_refresh(self, values, error=None):
         self._camera_refresh_running = False
-        try: self.btn_refresh_cameras.configure(text="Kameras neu suchen", state="normal")
-        except Exception: pass
+        try:
+            self.btn_refresh_cameras.configure(text="Kameras neu suchen", state="normal")
+        except Exception:
+            pass
         if error is not None:
             self.video_label.configure(text=f"Kamerasuche Fehler: {error}")
             return
@@ -2143,8 +2338,10 @@ class FoolproofSyncApp:
         self.camera_select.set(selected_source)
         self.current_live_source = selected_source
         if selected_source != "Keine Live-Quelle gefunden" and not selected_source.startswith("DeckLink: "):
-            try: self.current_camera_index = parse_camera_index(selected_source)
-            except Exception: self.current_camera_index = 0
+            try:
+                self.current_camera_index = parse_camera_index(selected_source)
+            except Exception:
+                self.current_camera_index = 0
 
     def trigger_background_load(self):
         threading.Thread(target=self._applescript_worker, daemon=True).start()
@@ -2155,7 +2352,8 @@ class FoolproofSyncApp:
             try:
                 result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
                 if result.returncode == 0: self._load_image_from_path(result.stdout.strip())
-            except Exception as e: print(f"macOS Finder Fehler: {e}")
+            except Exception as e:
+                print(f"macOS Finder Fehler: {e}")
         else:
             from tkinter import filedialog
             file_path = filedialog.askopenfilename(filetypes=[("Bilder", "*.jpg;*.jpeg;*.png")])
@@ -2182,11 +2380,14 @@ class FoolproofSyncApp:
             if choice != "Keine Live-Quelle gefunden" and not choice.startswith("DeckLink: "):
                 self.current_camera_index = parse_camera_index(choice)
             if was_running: self.root.after(150, lambda: self._start_camera_internal(preserve_preview=True))
-        except Exception as e: print(f"Fehler beim Kamerawechsel: {e}")
+        except Exception as e:
+            print(f"Fehler beim Kamerawechsel: {e}")
 
     def toggle_camera(self):
-        if not self.is_running: self._start_camera_internal()
-        else: self._stop_camera_internal()
+        if not self.is_running:
+            self._start_camera_internal()
+        else:
+            self._stop_camera_internal()
 
     def _start_camera_internal(self, preserve_preview=False):
         if self.is_running: return
@@ -2205,7 +2406,8 @@ class FoolproofSyncApp:
         if source.startswith("DeckLink: "):
             device_name = source.split("DeckLink: ", 1)[1]
             self.cap = DeckLinkLiveInput(device_name, self.live_output_mode.get())
-            try: self.cap.open()
+            try:
+                self.cap.open()
             except Exception as exc:
                 self.cap = None
                 self.video_label.configure(text=f"DeckLink Input Fehler: {exc}")
@@ -2224,10 +2426,12 @@ class FoolproofSyncApp:
             reported_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
             measured_fps = 0.0 if isinstance(self.cap, DeckLinkLiveInput) else measure_camera_input_fps(self.cap)
             actual_fps = measured_fps if measured_fps > 1.0 else (reported_fps if 1.0 < reported_fps <= 240.0 else 0.0)
-            self._reset_perf_metrics(source_fps=actual_fps, backend_name=backend_name, capture_size=(actual_w, actual_h))
+            self._reset_perf_metrics(source_fps=actual_fps, backend_name=backend_name,
+                                     capture_size=(actual_w, actual_h))
 
             self._main_ai_session_id += 1
-            try: self._start_main_ai_workers(self._main_ai_session_id)
+            try:
+                self._start_main_ai_workers(self._main_ai_session_id)
             except Exception as exc:
                 self._main_ai_stop_event.set()
                 self._stop_main_ai_workers()
@@ -2262,11 +2466,13 @@ class FoolproofSyncApp:
             img_tk = ctk.CTkImage(light_image=self.latest_pil_image, size=(self.ui_w, self.ui_h))
             self.video_label.configure(image=img_tk, text="")
             self.video_label.image = img_tk
-        with self.metrics_lock: metrics_text = self.metrics_text
+        with self.metrics_lock:
+            metrics_text = self.metrics_text
         if metrics_text != self.metrics_last_gui_text:
             self.metrics_label.configure(text=metrics_text)
             self.metrics_last_gui_text = metrics_text
-        self.root.after(33, self.update_gui_loop)
+        # FIX: Reduzierte UI-Aktualisierungsfrequenz auf 100ms, um CPU-Ressourcen für DeckLink I/O freizuhalten
+        self.root.after(100, self.update_gui_loop)
 
     def video_worker_loop(self):
         while self.is_running:
@@ -2279,8 +2485,9 @@ class FoolproofSyncApp:
                     time.sleep(0.02)
                     continue
                 break
-            ui_frame = cv2.resize(frame, (self.ui_w, self.ui_h))
-            rgb_frame = cv2.cvtColor(ui_frame, cv2.COLOR_BGR2RGB)
+            
+            # FIX: Sendet die vollen 1080p nativen SDI-Pixel an die KI statt des herunterskalierten UI-Vorschaubildes
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self._enqueue_main_ai_job({
                 "session_id": self._main_ai_session_id,
                 "frame_id": self._main_ai_frame_counter + 1,
